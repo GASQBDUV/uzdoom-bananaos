@@ -10,8 +10,11 @@
 - **[sandstranger](https://github.com/sandstranger)**: [com.mobilerpgpack.phone](https://github.com/sandstranger/com.mobilerpgpack.phone), the Android
   port collection the above is built on, and the Android build of UZDoom.
 - **[ZDoom/ZMusic](https://github.com/ZDoom/ZMusic)**: UZDoom's music library, built from source and shipped as a shared library.
-- **Doom Engines for PortMaster** (Slayer366, DDRSoul, Jeod, Speedrun): the Love2D game picker that UZDoom is added to. Nothing of it is
-  copied into this repository; `integrate-doomengines.sh` only edits the user's own copy.
+- **Doom Engines for PortMaster**: many thanks to **Slayer366, DDRSoul, Jeod and Speedrun**, whose Love2D game picker, with Crispy Doom and
+  GZDoom, makes this easy to use. Project: <https://portmaster.games/detail.html?name=doomengines>, source:
+  <https://github.com/PortsMaster/PortMaster-New/tree/main/ports/doomengines>. It is included in the release zip, unchanged;
+  `integrate-doomengines.sh` adds UZDoom to the user's copy. Its own thanks apply too: Andrew Hushult (launcher music), Cyril Deletre
+  (HackSDL, the gamepad work), the PortMaster Discord testers, and the Crispy Doom and GZDoom teams. Nothing of it is in this repository.
 - **bananaOS**: the operating system this is made for, and its two-panel display set-up.
 - **[PortMaster](https://portmaster.games/)**: `gptokeyb`, which turns the gamepad into keyboard and mouse, and the launcher conventions used here.
 - The bottom-panel drawing through DRM is the technique first used in the Lighthouse companion screen for bananaOS, and in the
