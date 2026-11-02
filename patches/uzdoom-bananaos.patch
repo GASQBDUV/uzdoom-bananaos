@@ -1,0 +1,540 @@
+diff --git a/libraries/ZWidget/CMakeLists.txt b/libraries/ZWidget/CMakeLists.txt
+index b5a831f252..26cbda520c 100644
+--- a/libraries/ZWidget/CMakeLists.txt
++++ b/libraries/ZWidget/CMakeLists.txt
+@@ -158,7 +158,7 @@ if(MSVC)
+ endif()
+ 
+ add_library(zwidget STATIC ${ZWIDGET_SOURCES} ${ZWIDGET_INCLUDES})
+-target_link_libraries(zwidget ${ZWIDGET_LIBS})
++target_link_libraries(zwidget PUBLIC ${ZWIDGET_LIBS})
+ set_target_properties(zwidget PROPERTIES CXX_STANDARD 17)
+ 
+ if(SDL2_FOUND)
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 48f472630c..1c8833b955 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -350,6 +350,10 @@ if (HAVE_VULKAN)
+ endif()
+ 
+ list( APPEND PROJECT_LIBRARIES "zwidget" )
++if( NOT ANDROID )
++	list( APPEND PROJECT_LIBRARIES drm )
++	include_directories( SYSTEM /usr/include/libdrm )
++endif()
+ list( APPEND PROJECT_LIBRARIES "webp" )
+ 
+ # ZMUSIC
+@@ -465,7 +469,8 @@ set( PLAT_SDL_SOURCES
+ 	common/platform/posix/sdl/i_main.cpp
+ 	common/platform/posix/sdl/i_system.cpp
+ 	common/platform/posix/sdl/sdlglvideo.cpp
+-	common/platform/posix/sdl/st_start.cpp )
++	common/platform/posix/sdl/st_start.cpp
++	common/platform/posix/sdl/banana_bottom.cpp )
+ set( PLAT_UNIX_SOURCES
+ 	common/platform/posix/unix/i_specialpaths.cpp
+ 	common/platform/posix/unix/gtk_dialogs.cpp )
+diff --git a/src/common/platform/posix/sdl/banana_bottom.cpp b/src/common/platform/posix/sdl/banana_bottom.cpp
+new file mode 100755
+index 0000000000..9eacc91108
+--- /dev/null
++++ b/src/common/platform/posix/sdl/banana_bottom.cpp
+@@ -0,0 +1,133 @@
++// Bottom panel of the Anbernic RG DS under bananaOS: shows an RGBA picture on DSI-1 through a DRM dumb buffer.
++// The DRM device is the one SDL's KMSDRM video driver already holds open (found through /proc/self/fd), the
++// panel gets its own free CRTC. Same idea as the ScummVM second-screen shim (GPL-3.0-or-later).
++#include <fcntl.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <unistd.h>
++#include <xf86drm.h>
++#include <xf86drmMode.h>
++
++#define BLOG(...) do { fprintf(stderr, "BANANA-BOTTOM: " __VA_ARGS__); fputc('\n', stderr); fflush(stderr); } while (0)
++
++static struct { uint32_t handle = 0; int fd = -1; uint32_t pitch = 0; size_t size = 0; uint8_t *px = nullptr; int W = 0, H = 0; int tried = 0, ok = 0; } B;
++
++static int bottom_find_fd()
++{
++	char path[64], buf[256];
++	for (int fd = 3; fd < 256; fd++)
++	{
++		snprintf(path, sizeof path, "/proc/self/fd/%d", fd);
++		ssize_t n = readlink(path, buf, sizeof buf - 1);
++		if (n > 0) { buf[n] = 0; if (!strncmp(buf, "/dev/dri/card", 13)) return fd; }
++	}
++	return -1;
++}
++
++extern "C" int banana_bottom_open(int *w, int *h)
++{
++	if (B.tried) { if (B.ok) { *w = B.W; *h = B.H; } return B.ok; }
++	B.tried = 1;
++	int fd = bottom_find_fd();
++	if (fd < 0) { BLOG("no /dev/dri/card fd in this process"); return 0; }
++	drmModeRes *res = drmModeGetResources(fd);
++	if (!res) { BLOG("drmModeGetResources failed"); return 0; }
++	const char *e = getenv("BANANA_PANEL_ID");
++	int want = e ? atoi(e) : 1;
++	drmModeConnector *conn = nullptr;
++	for (int i = 0; i < res->count_connectors; i++)
++	{
++		drmModeConnector *c = drmModeGetConnector(fd, res->connectors[i]);
++		if (!c) continue;
++		if (c->connector_type == 16 && (int)c->connector_type_id == want && c->connection == DRM_MODE_CONNECTED && c->count_modes > 0) conn = c;
++		else drmModeFreeConnector(c);
++	}
++	if (!conn) { BLOG("DSI-%d not found", want); drmModeFreeResources(res); return 0; }
++	drmModeModeInfo mode = conn->modes[0];
++	int W = mode.hdisplay, H = mode.vdisplay;
++	uint32_t conn_id = conn->connector_id, busy = 0;
++	for (int i = 0; i < res->count_connectors; i++)
++	{
++		if (res->connectors[i] == conn_id) continue;
++		drmModeConnector *c = drmModeGetConnector(fd, res->connectors[i]);
++		if (!c) continue;
++		if (c->encoder_id)
++		{
++			drmModeEncoder *en = drmModeGetEncoder(fd, c->encoder_id);
++			if (en) { for (int k = 0; k < res->count_crtcs; k++) if (res->crtcs[k] == en->crtc_id) busy |= 1u << k; drmModeFreeEncoder(en); }
++		}
++		drmModeFreeConnector(c);
++	}
++	uint32_t possible = 0, cur = 0;
++	for (int i = 0; i < conn->count_encoders; i++)
++	{
++		drmModeEncoder *en = drmModeGetEncoder(fd, conn->encoders[i]);
++		if (!en) continue;
++		possible |= en->possible_crtcs;
++		if (conn->encoder_id == en->encoder_id) cur = en->crtc_id;
++		drmModeFreeEncoder(en);
++	}
++	uint32_t crtc = 0;
++	for (int k = 0; k < res->count_crtcs && !crtc; k++)
++		if ((possible & (1u << k)) && !(busy & (1u << k)) && !(cur && res->crtcs[k] != cur)) crtc = res->crtcs[k];
++	for (int k = 0; k < res->count_crtcs && !crtc; k++)
++		if ((possible & (1u << k)) && !(busy & (1u << k))) crtc = res->crtcs[k];
++	BLOG("fd %d connector %u crtc %u mode %dx%d", fd, conn_id, crtc, W, H);
++	if (!crtc) { BLOG("no free CRTC"); return 0; }
++
++	struct drm_mode_create_dumb cd = {};
++	cd.width = W; cd.height = H; cd.bpp = 32;
++	if (drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &cd)) { BLOG("create dumb failed"); return 0; }
++	uint32_t handles[4] = { cd.handle, 0, 0, 0 }, pitches[4] = { cd.pitch, 0, 0, 0 }, offsets[4] = { 0, 0, 0, 0 }, fb = 0;
++	uint32_t fmt = 0x34324258; // XBGR8888: bytes R,G,B,X
++	if (drmModeAddFB2(fd, W, H, fmt, handles, pitches, offsets, &fb, 0))
++	{
++		fmt = 0x34324241; // ABGR8888
++		if (drmModeAddFB2(fd, W, H, fmt, handles, pitches, offsets, &fb, 0)) { BLOG("addfb2 failed"); return 0; }
++	}
++	struct drm_mode_map_dumb md = {};
++	md.handle = cd.handle;
++	if (drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &md)) { BLOG("map dumb failed"); return 0; }
++	void *m = mmap(nullptr, cd.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, md.offset);
++	if (m == MAP_FAILED) { BLOG("mmap failed"); return 0; }
++	memset(m, 0, cd.size);
++	uint32_t cids[1] = { conn_id };
++	if (drmModeSetCrtc(fd, crtc, fb, 0, 0, cids, 1, &mode)) { BLOG("setcrtc failed"); return 0; }
++	B.handle = cd.handle; B.fd = fd; B.pitch = cd.pitch; B.size = cd.size; B.px = (uint8_t *)m; B.W = W; B.H = H; B.ok = 1;
++	drmModeFreeConnector(conn); drmModeFreeResources(res);
++	BLOG("running: %dx%d pitch %u", W, H, B.pitch);
++	*w = W; *h = H;
++	return 1;
++}
++
++// rgba: w*h pixels as glReadPixels returns them (rows bottom to top). Scaled (nearest) and flipped into the dumb buffer.
++extern "C" void banana_bottom_present(const uint8_t *rgba, int w, int h)
++{
++	if (!B.ok || !rgba || w <= 0 || h <= 0) return;
++	static int *xmap = nullptr; static int xmap_w = 0, xmap_n = 0;
++	if (!xmap || xmap_w != w || xmap_n != B.W)
++	{
++		free(xmap); xmap = (int *)malloc(sizeof(int) * B.W); xmap_w = w; xmap_n = B.W;
++		for (int x = 0; x < B.W; x++) xmap[x] = (int)((int64_t)x * w / B.W);
++	}
++	for (int y = 0; y < B.H; y++)
++	{
++		const uint32_t *src = (const uint32_t *)(rgba + (size_t)(h - 1 - (int)((int64_t)y * h / B.H)) * w * 4);
++		uint32_t *dst = (uint32_t *)(B.px + (size_t)y * B.pitch);
++		if (w == B.W) memcpy(dst, src, (size_t)B.W * 4);
++		else for (int x = 0; x < B.W; x++) dst[x] = src[xmap[x]];
++	}
++}
++
++// The scan-out buffer as a dma-buf, so the GPU can draw into it directly (no read-back). Returns -1 if it cannot.
++extern "C" int banana_bottom_export(uint32_t *pitch)
++{
++	if (!B.ok) return -1;
++	int prime = -1;
++	if (drmPrimeHandleToFD(B.fd, B.handle, DRM_CLOEXEC | DRM_RDWR, &prime)) { BLOG("drmPrimeHandleToFD failed"); return -1; }
++	*pitch = B.pitch;
++	return prime;
++}
+diff --git a/src/common/rendering/gles/gles_framebuffer.cpp b/src/common/rendering/gles/gles_framebuffer.cpp
+index 094efefe9f..47cceef4fa 100644
+--- a/src/common/rendering/gles/gles_framebuffer.cpp
++++ b/src/common/rendering/gles/gles_framebuffer.cpp
+@@ -33,6 +33,9 @@
+ **
+ */ 
+ 
++#include <time.h>
++#include <stdio.h>
++#include <stdlib.h>
+ #include "gles_system.h"
+ #include "v_video.h"
+ #include "m_png.h"
+@@ -670,13 +673,214 @@ bool OpenGLFrameBuffer::Render2DToMainScreen(F2DDrawer* drawer, int width, int h
+ 	return true;
+ }
+ #else
++extern "C" void banana_bottom_present(const uint8_t* rgba, int w, int h);
++extern "C" int banana_bottom_export(uint32_t* pitch);
++#include <SDL.h>
++
++// Zero-copy lower screen: the panel's buffer is imported into GL as a dma-buf texture and the picture is blitted
++// (upside down, GL's origin is at the bottom) straight into it, so there is no read-back to wait for.
++static int BananaZeroCopySetup(GLuint& fbo, GLuint& tex, int w, int h)
++{
++	typedef void* (*PFN_getdisplay)(void);
++	typedef void* (*PFN_createimage)(void*, void*, unsigned, void*, const int*);
++	typedef void (*PFN_target)(unsigned, void*);
++	auto getDisplay = (PFN_getdisplay)SDL_GL_GetProcAddress("eglGetCurrentDisplay");
++	auto createImage = (PFN_createimage)SDL_GL_GetProcAddress("eglCreateImageKHR");
++	auto imageTarget = (PFN_target)SDL_GL_GetProcAddress("glEGLImageTargetTexture2DOES");
++	if (!getDisplay || !createImage || !imageTarget) { fprintf(stderr, "BANANA-BOTTOM: zero-copy: EGL image functions missing\n"); return 0; }
++	uint32_t pitch = 0;
++	int prime = banana_bottom_export(&pitch);
++	if (prime < 0) return 0;
++	const int attrs[] = { 0x3057 /*EGL_WIDTH*/, w, 0x3056 /*EGL_HEIGHT*/, h, 0x3271 /*FOURCC*/, 0x34324258 /*XBGR8888*/,
++		0x3272 /*FD*/, prime, 0x3273 /*OFFSET*/, 0, 0x3274 /*PITCH*/, (int)pitch, 0x3038 /*EGL_NONE*/ };
++	void* image = createImage(getDisplay(), nullptr, 0x3270 /*EGL_LINUX_DMA_BUF_EXT*/, nullptr, attrs);
++	if (!image) { fprintf(stderr, "BANANA-BOTTOM: zero-copy: eglCreateImage failed\n"); return 0; }
++	glGenTextures(1, &tex);
++	glBindTexture(GL_TEXTURE_2D, tex);
++	imageTarget(GL_TEXTURE_2D, image);
++	glGenFramebuffers(1, &fbo);
++	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
++	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
++	GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
++	if (st != GL_FRAMEBUFFER_COMPLETE) { fprintf(stderr, "BANANA-BOTTOM: zero-copy: framebuffer incomplete (0x%x)\n", st); return 0; }
++	fprintf(stderr, "BANANA-BOTTOM: zero-copy on (%dx%d, dma-buf)\n", w, h);
++	return 1;
++}
++
+ void OpenGLFrameBuffer::SetSecondScreenNativeWindow(void* nativeWindow, int width, int height)
+ {
++	SecondScreenNativeWindow = nativeWindow;
++	SecondScreenSurfaceWidth = width > 0 ? width : 0;
++	SecondScreenSurfaceHeight = height > 0 ? height : 0;
+ }
+ 
+ bool OpenGLFrameBuffer::Render2DToSecondScreen(F2DDrawer* drawer, int width, int height)
+ {
+-	return false;
++	// bananaOS: draw the 2D layer (status bar, automap) into an off-screen target the size of the lower panel,
++	// read it back and put it on the panel through DRM.
++	if (GLRenderer == nullptr || drawer == nullptr || width <= 0 || height <= 0 || SecondScreenNativeWindow == nullptr ||
++		SecondScreenSurfaceWidth <= 0 || SecondScreenSurfaceHeight <= 0)
++	{
++		return false;
++	}
++
++	GLint previousFramebuffer = 0;
++	GLint previousViewport[4] = { 0, 0, 0, 0 };
++	GLint previousScissor[4] = { 0, 0, 0, 0 };
++	GLfloat previousClearColor[4] = { 0.f, 0.f, 0.f, 0.f };
++	GLboolean scissorWasEnabled = glIsEnabled(GL_SCISSOR_TEST);
++	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previousFramebuffer);
++	glGetIntegerv(GL_VIEWPORT, previousViewport);
++	glGetIntegerv(GL_SCISSOR_BOX, previousScissor);
++	glGetFloatv(GL_COLOR_CLEAR_VALUE, previousClearColor);
++
++	static int zc = -1; static GLuint zcFbo = 0, zcTex = 0;
++	if (zc < 0)
++	{
++		zc = getenv("BANANA_NO_ZEROCOPY") ? 0 : BananaZeroCopySetup(zcFbo, zcTex, SecondScreenSurfaceWidth, SecondScreenSurfaceHeight);
++		glBindFramebuffer(GL_FRAMEBUFFER, previousFramebuffer);
++	}
++	// the lower picture is drawn at 1/BANANA_BOTTOM_SCALE of the panel size and enlarged, and refreshed at most BANANA_BOTTOM_HZ times a second
++	static int bscale = 0, bhz = 0;
++	if (bscale == 0)
++	{
++		const char* es = getenv("BANANA_BOTTOM_SCALE"); const char* eh = getenv("BANANA_BOTTOM_HZ");
++		bscale = es ? atoi(es) : 2; if (bscale < 1) bscale = 1;
++		bhz = eh ? atoi(eh) : 20; if (bhz < 1) bhz = 1;
++	}
++	static uint64_t lastMs = 0, sumUs = 0, sumDrawUs = 0, frames = 0, skipped = 0;
++	{
++		struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++		uint64_t nowMs = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
++		if (nowMs - lastMs < (uint64_t)(SecondScreenStill >= 10 ? 200 : 1000 / bhz)) { skipped++; return true; }
++		lastMs = nowMs;
++	}
++	struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
++	const int sw = SecondScreenSurfaceWidth / bscale, sh = SecondScreenSurfaceHeight / bscale;
++	if (SecondScreenFbo == 0 || SecondScreenTexW != sw || SecondScreenTexH != sh)
++	{
++		if (SecondScreenFbo == 0) { glGenFramebuffers(1, &SecondScreenFbo); glGenTextures(1, &SecondScreenTex); }
++		glBindTexture(GL_TEXTURE_2D, SecondScreenTex);
++		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, sw, sh, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
++		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++		glBindFramebuffer(GL_FRAMEBUFFER, SecondScreenFbo);
++		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, SecondScreenTex, 0);
++		SecondScreenTexW = sw;
++		SecondScreenTexH = sh;
++		SecondScreenPixels.resize((size_t)sw * sh * 4);
++	}
++
++	const float frameAspect = float(width) / float(height);
++	int destinationWidth = sw;
++	int destinationHeight = int(float(destinationWidth) / frameAspect + 0.5f);
++	if (destinationHeight > sh)
++	{
++		destinationHeight = sh;
++		destinationWidth = int(float(destinationHeight) * frameAspect + 0.5f);
++	}
++	const int destinationX = (sw - destinationWidth) / 2;
++	const int destinationY = 0;
++
++	glBindFramebuffer(GL_FRAMEBUFFER, SecondScreenFbo);
++	glViewport(0, 0, sw, sh);
++	glDisable(GL_SCISSOR_TEST);
++	glClearColor(0.f, 0.f, 0.f, 1.f);
++	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
++
++	::Draw2D(drawer, gl_RenderState, destinationX, destinationY, destinationWidth, destinationHeight);
++	struct timespec tD; clock_gettime(CLOCK_MONOTONIC, &tD);
++	if (zc)
++	{
++		typedef void (*PFN_blit)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
++		static PFN_blit blit = (PFN_blit)SDL_GL_GetProcAddress("glBlitFramebuffer");
++		glBindFramebuffer(0x8CA8 /*READ*/, SecondScreenFbo);
++		glBindFramebuffer(0x8CA9 /*DRAW*/, zcFbo);
++		blit(0, 0, sw, sh, 0, SecondScreenSurfaceHeight, SecondScreenSurfaceWidth, 0, GL_COLOR_BUFFER_BIT, bscale > 1 ? GL_LINEAR : GL_NEAREST); // flipped, enlarged
++		glFlush();
++		glBindFramebuffer(GL_FRAMEBUFFER, previousFramebuffer);
++		struct timespec t1z; clock_gettime(CLOCK_MONOTONIC, &t1z);
++		sumUs += (uint64_t)((t1z.tv_sec - t0.tv_sec) * 1000000LL + (t1z.tv_nsec - t0.tv_nsec) / 1000);
++		sumDrawUs += (uint64_t)((tD.tv_sec - t0.tv_sec) * 1000000LL + (tD.tv_nsec - t0.tv_nsec) / 1000);
++		if (++frames % 100 == 0 && getenv("BANANA_BOTTOM_DEBUG"))
++		{
++			fprintf(stderr, "BANANA-BOTTOM: zero-copy %d x %d, avg %.2f ms per update (drawing %.2f ms), %d Hz max\n", sw, sh, sumUs / 100000.0, sumDrawUs / 100000.0, bhz);
++			fflush(stderr); sumUs = 0; sumDrawUs = 0;
++		}
++		glViewport(previousViewport[0], previousViewport[1], previousViewport[2], previousViewport[3]);
++		glScissor(previousScissor[0], previousScissor[1], previousScissor[2], previousScissor[3]);
++		if (scissorWasEnabled) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
++		glClearColor(previousClearColor[0], previousClearColor[1], previousClearColor[2], previousClearColor[3]);
++		gl_RenderState.ClearLastMaterial();
++		return true;
++	}
++	const size_t picBytes = (size_t)sw * sh * 4;
++	const uint8_t* pic = nullptr;
++	// pixel pack buffers need OpenGL ES 3.0 or newer (the device reports 3.1); only used with BANANA_PBO=1
++	static int pboOk = -1;
++	if (pboOk < 0)
++	{
++		const char* ver = (const char*)glGetString(GL_VERSION);
++		pboOk = (ver && strstr(ver, "OpenGL ES ") && ver[10] >= '3' && glMapBufferRange && glUnmapBuffer && getenv("BANANA_PBO") != nullptr) ? 1 : 0; // off by default: on Mesa/Panfrost it is 7x slower
++	}
++	bool usePbo = pboOk == 1;
++	if (usePbo)
++	{
++		// read back asynchronously: start this frame's copy into one buffer, take the picture the other buffer got last time
++		const unsigned GLX_PACK = 0x88EB, GLX_STREAM_READ = 0x88E1, GLX_MAP_READ = 0x0001;
++		if (SecondScreenPbo[0] == 0 || SecondScreenTexW != sw + 100000) // (re)create below when the size changed
++		{
++			if (SecondScreenPbo[0] == 0) glGenBuffers(2, SecondScreenPbo);
++		}
++		static size_t pboBytes = 0;
++		if (pboBytes != picBytes)
++		{
++			for (int k = 0; k < 2; k++) { glBindBuffer(GLX_PACK, SecondScreenPbo[k]); glBufferData(GLX_PACK, picBytes, nullptr, GLX_STREAM_READ); }
++			pboBytes = picBytes; SecondScreenPboPrimed = false;
++		}
++		const int cur = SecondScreenPboIdx, prev = 1 - cur;
++		glBindBuffer(GLX_PACK, SecondScreenPbo[cur]);
++		glReadPixels(0, 0, sw, sh, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
++		if (SecondScreenPboPrimed)
++		{
++			glBindBuffer(GLX_PACK, SecondScreenPbo[prev]);
++			pic = (const uint8_t*)glMapBufferRange(GLX_PACK, 0, picBytes, GLX_MAP_READ);
++		}
++		SecondScreenPboIdx = prev;
++		SecondScreenPboPrimed = true;
++		if (pic)
++		{
++			if (SecondScreenLast.size() == picBytes && memcmp(SecondScreenLast.data(), pic, picBytes) == 0) { if (SecondScreenStill < 1000) SecondScreenStill++; }
++			else { SecondScreenStill = 0; SecondScreenLast.assign(pic, pic + picBytes); banana_bottom_present(pic, sw, sh); }
++			glUnmapBuffer(GLX_PACK);
++		}
++		glBindBuffer(GLX_PACK, 0);
++	}
++	else
++	{
++		glReadPixels(0, 0, sw, sh, GL_RGBA, GL_UNSIGNED_BYTE, SecondScreenPixels.data());
++		pic = SecondScreenPixels.data();
++		if (SecondScreenLast.size() == picBytes && memcmp(SecondScreenLast.data(), pic, picBytes) == 0) { if (SecondScreenStill < 1000) SecondScreenStill++; }
++		else { SecondScreenStill = 0; SecondScreenLast.assign(pic, pic + picBytes); banana_bottom_present(pic, sw, sh); }
++	}
++	{
++		struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
++		sumUs += (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000);
++		sumDrawUs += (uint64_t)((tD.tv_sec - t0.tv_sec) * 1000000LL + (tD.tv_nsec - t0.tv_nsec) / 1000);
++		if (++frames % 100 == 0 && getenv("BANANA_BOTTOM_DEBUG"))
++		{
++			fprintf(stderr, "BANANA-BOTTOM: %d x %d, avg %.2f ms per update, of which drawing %.2f ms, pbo %d, still %d (%llu updates, %llu skipped), %d Hz max\n", sw, sh, sumUs / 100000.0, sumDrawUs / 100000.0, pboOk, SecondScreenStill, (unsigned long long)frames, (unsigned long long)skipped, bhz);
++			fflush(stderr); sumUs = 0; sumDrawUs = 0;
++		}
++	}
++
++	glBindFramebuffer(GL_FRAMEBUFFER, previousFramebuffer);
++	glViewport(previousViewport[0], previousViewport[1], previousViewport[2], previousViewport[3]);
++	glScissor(previousScissor[0], previousScissor[1], previousScissor[2], previousScissor[3]);
++	if (scissorWasEnabled) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
++	glClearColor(previousClearColor[0], previousClearColor[1], previousClearColor[2], previousClearColor[3]);
++	gl_RenderState.ClearLastMaterial();
++	return true;
+ }
+ 
+ bool OpenGLFrameBuffer::PresentGameFrameToSecondScreen()
+diff --git a/src/common/rendering/gles/gles_framebuffer.h b/src/common/rendering/gles/gles_framebuffer.h
+index 68394d01d2..45c46d3b85 100644
+--- a/src/common/rendering/gles/gles_framebuffer.h
++++ b/src/common/rendering/gles/gles_framebuffer.h
+@@ -84,6 +84,20 @@ public:
+ 	EGLSurface SecondScreenEglSurface = nullptr;
+ 	int SecondScreenSurfaceWidth = 0;
+ 	int SecondScreenSurfaceHeight = 0;
++#else
++	// bananaOS: the second screen is rendered into an off-screen target, read back and handed to banana_bottom.cpp
++	void* SecondScreenNativeWindow = nullptr;
++	int SecondScreenSurfaceWidth = 0;
++	int SecondScreenSurfaceHeight = 0;
++	unsigned int SecondScreenFbo = 0;
++	unsigned int SecondScreenTex = 0;
++	int SecondScreenTexW = 0, SecondScreenTexH = 0;
++	std::vector<uint8_t> SecondScreenPixels;
++	std::vector<uint8_t> SecondScreenLast;
++	unsigned int SecondScreenPbo[2] = { 0, 0 };
++	int SecondScreenPboIdx = 0;
++	bool SecondScreenPboPrimed = false;
++	int SecondScreenStill = 0; // updates in a row where the lower picture did not change
+ #endif
+ 
+ 	// When true, Update() presents the game frame to the secondary display (screen swap).
+diff --git a/src/d_main.cpp b/src/d_main.cpp
+index 0e9f0316e1..8f4e51e626 100644
+--- a/src/d_main.cpp
++++ b/src/d_main.cpp
+@@ -233,6 +233,28 @@ static std::vector<uint32_t> uzSecondScreenHudFrame;
+ static int uzSecondScreenHudFrameWidth = 0;
+ static int uzSecondScreenHudFrameHeight = 0;
+ static bool uzSecondScreenHudFrameReady = false;
++#if !ANDROID
++#include <time.h>
++// bananaOS: the lower panel is driven through DRM (banana_bottom.cpp); "active window" only means "there is a lower screen".
++static void* uzSecondScreenHudActiveWindow = nullptr;
++static int uzSecondScreenHudSurfaceWidth = 0;
++static int uzSecondScreenHudSurfaceHeight = 0;
++extern "C" int banana_bottom_open(int* w, int* h);
++static void D_BananaInitSecondScreen()
++{
++	static bool tried = false;
++	if (tried || screen == nullptr) return;
++	tried = true;
++	if (getenv("BANANA_SECOND") == nullptr) return;
++	int w = 0, h = 0;
++	if (!banana_bottom_open(&w, &h)) return;
++	uzSecondScreenHudActiveWindow = (void*)1;
++	uzSecondScreenHudSurfaceWidth = w;
++	uzSecondScreenHudSurfaceHeight = h;
++	uzSecondScreenHudRequested.store(true, std::memory_order_relaxed);
++	screen->SetSecondScreenNativeWindow(uzSecondScreenHudActiveWindow, w, h);
++}
++#endif
+ // Set to true just before PerformWipe so D_RenderSecondScreenMapFrame triggers a melt on the next call.
+ static bool sUzSecondScreenPendingMelt = false;
+ // Persistent heap drawer for second-screen HUD — kept at file scope so D_Display can snapshot it.
+@@ -478,7 +500,7 @@ static void D_GetSecondScreenContentDims(int& w, int& h)
+ 	}
+ 	w = uzSecondScreenHudRenderWidth;
+ 	h = uzSecondScreenHudRenderHeight;
+-#if ANDROID
++#if 1
+ 	if (uzSecondScreenHudSurfaceWidth > 0 && uzSecondScreenHudSurfaceHeight > 0)
+ 	{
+ 		w = uzSecondScreenHudSurfaceWidth;
+@@ -513,6 +535,9 @@ static void D_RenderSecondScreenMapFrame(sector_t* viewsec, double ticFrac)
+ 		);
+ 	}
+ 	if (uzSecondScreenHudActiveWindow == nullptr) { return; }
++#else
++	D_BananaInitSecondScreen();
++	if (uzSecondScreenHudActiveWindow == nullptr) { return; }
+ #endif
+ 
+ 	// In screen-swap mode this content stream is shown on the MAIN display instead of the
+@@ -896,6 +921,21 @@ static void D_RenderSecondScreenMapFrame(sector_t* viewsec, double ticFrac)
+ 		return;
+ 	}
+ 
++#if !ANDROID
++	{
++		// bananaOS: build and draw the lower picture only BANANA_BOTTOM_HZ times a second; the panel keeps showing the last one.
++		// (Building the status bar and the automap every frame cost about 25% of the frame rate.)
++		static int hz = 0;
++		static uint64_t lastMs = 0;
++		if (hz == 0) { const char* e = getenv("BANANA_BOTTOM_HZ"); hz = e ? atoi(e) : 30; if (hz < 1) hz = 1; }
++		struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++		const uint64_t nowMs = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
++		if (nowMs - lastMs < (uint64_t)(1000 / hz)) { return; }
++		lastMs = nowMs;
++	}
++	struct timespec tB0; clock_gettime(CLOCK_MONOTONIC, &tB0);
++#endif
++
+ 	// sMapDrawer is file-scope; initialise lazily on first call.
+ 	if (sMapDrawer == nullptr) sMapDrawer = new F2DDrawer();
+ 	F2DDrawer& mapDrawer = *sMapDrawer;
+@@ -938,8 +978,24 @@ static void D_RenderSecondScreenMapFrame(sector_t* viewsec, double ticFrac)
+ 	twod = savedDrawer;
+ 	StatusBar->SetScale();
+ 
++#if !ANDROID
++	struct timespec tB1; clock_gettime(CLOCK_MONOTONIC, &tB1);
++#endif
+ 	if (D_PresentSecondScreenContent(&mapDrawer, mapSourceWidth, mapSourceHeight))
+ 	{
++#if !ANDROID
++		{
++			static uint64_t buildUs = 0, presentUs = 0, n = 0;
++			struct timespec tB2; clock_gettime(CLOCK_MONOTONIC, &tB2);
++			buildUs += (uint64_t)((tB1.tv_sec - tB0.tv_sec) * 1000000LL + (tB1.tv_nsec - tB0.tv_nsec) / 1000);
++			presentUs += (uint64_t)((tB2.tv_sec - tB1.tv_sec) * 1000000LL + (tB2.tv_nsec - tB1.tv_nsec) / 1000);
++			if (++n % 100 == 0 && getenv("BANANA_BOTTOM_DEBUG"))
++			{
++				fprintf(stderr, "BANANA-BOTTOM: engine build %.2f ms, present %.2f ms per update" "\n", buildUs / 100000.0, presentUs / 100000.0);
++				fflush(stderr); buildUs = presentUs = 0;
++			}
++		}
++#endif
+ 		return;
+ 	}
+ 
+@@ -1742,7 +1798,7 @@ static bool D_IsSecondScreenSwapActive()
+ #if ANDROID
+ 	return uzSecondScreenHudActiveWindow != nullptr;
+ #else
+-	return false;
++	return false; // swapping the screens is not supported on bananaOS
+ #endif
+ }
+ 

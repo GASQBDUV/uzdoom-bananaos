@@ -1,0 +1,25 @@
+# UZDoom on the RG DS Plus: the classic Doom layout, one stick (walk and turn), no mouse needed
+# stick and D-pad: forward, back, turn
+# the stick sends its own keys (w s j l, bound in uzdoom.cfg) so it does not fight with the D-pad over the arrow keys
+left_analog_up = w
+left_analog_down = s
+left_analog_left = j
+left_analog_right = l
+up = up
+down = down
+left = left
+right = right
+# L1 / R1 strafe left / right (a and d, bound in uzdoom.cfg), L2 next weapon
+l1 = a
+r1 = d
+r2 = tab
+l2 = ]
+# A use / open / menu confirm, B run (hold), Y use, X fire, R2 automap
+a = enter
+b = shift
+y = space
+x = ctrl
+# L3 (press the stick) toggles always-run, Start opens the menu, Select goes back in menus
+l3 = capslock
+start = esc
+back = backspace
