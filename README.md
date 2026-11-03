@@ -12,7 +12,7 @@ Unzip it on the card, start it from the ports list, pick a game. **Doom Engines 
 
 ## Install
 
-1. Download `UZDoom-bananaos-v1.1.zip` from the [latest release](../../releases/latest) (about 100 MB).
+1. Download `UZDoom-bananaos-v1.1.1.zip` from the [latest release](../../releases/latest) (about 100 MB).
 2. Unzip it at the **root of the data partition** (the card that holds `roms/`), so that `roms/ports/UZDoom Two Screens.sh`,
    `roms/ports/Doom Engines.sh` and the folders `roms/ports/UZDoom/` and `roms/ports/doomengines/` end up next to your other ports.
    **If you already have Doom Engines**, back up `roms/ports/doomengines/` and `Doom Engines.sh` first: the zip replaces the files
@@ -55,8 +55,9 @@ Doom Engines is the PortMaster port by Slayer366, DDRSoul, Jeod and Speedrun ([t
 
 - a third engine in its menu (L / R step through Crispy Doom, GZ Doom, UZDoom),
 - the hand-over to UZDoom in `Doom Engines.sh`,
-- the one-stick button map (`doomengines/configs/1.gptk`): the D-pad does what the stick does, **L1 / R1** strafe (they used to pick weapons 6 and 7),
-  **X** fires, **R2** is the automap.
+- the one-stick button map (`doomengines/configs/1.gptk`): the stick and the D-pad both turn and walk, **L1 / R1** strafe
+  (they used to pick weapons 6 and 7), **B** runs, **X** fires, **R2** is the automap, **Start** the menu. (They turn with the keys `j` and `l`, not the
+  arrow keys: with arrows gptokeyb makes the stick press left and right at once. Crispy Doom and GZDoom are set to use those keys.)
 
 It only changes files it recognises, runs again without doing anything twice, and keeps a copy of each file as `<name>.bak-uzdoom`.
 To undo it, copy those back. To stop it from touching Doom Engines, create an empty file `roms/ports/UZDoom/no-doomengines-patch`.
@@ -101,6 +102,8 @@ The script fetches the UZDoom fork and ZMusic at fixed commits and applies [patc
 - The bottom screen is not touch-controlled.
 - The bottom picture is soft (half resolution) on purpose, to save frame rate.
 - Only the one-stick button map of Doom Engines is changed (the RG DS has one stick).
+- The controls in Crispy Doom and GZDoom (through Doom Engines) are rough: stick, D-pad and some buttons may not behave as in the table.
+  Fix them in `roms/ports/doomengines/configs/1.gptk` (buttons) and the engines' own menus. UZDoom's controls are the ones that were tuned.
 - Crispy Doom needs a few compatibility libraries on bananaOS (`doomengines/libs/crispy/`); jack, pulse and pipewire in it are empty
   placeholders so that it starts. Crispy Doom's music was not tested for this release.
 

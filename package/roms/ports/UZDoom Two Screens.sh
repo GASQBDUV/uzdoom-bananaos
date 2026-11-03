@@ -19,7 +19,12 @@ DE="/$directory/ports/doomengines"
 FILE=""
 # add UZDoom as a third engine to Doom Engines (copies of what it changes are kept as *.bak-uzdoom)
 [ -f "$GAMEDIR/integrate-doomengines.sh" ] && bash "$GAMEDIR/integrate-doomengines.sh" "$DE" > "$GAMEDIR/integrate.log" 2>&1
-# the Doom Engines launcher (a Love2D menu) lists the .doom files with IWAD, mods, skill and map
+# with Doom Engines present, its own launcher does the whole job: it lists the .doom files with IWAD, mods, skill and map, offers
+# Crispy Doom, GZ Doom and UZDoom, and hands over to UZDoom (second screen) when that is picked
+if [ -f "$DE/love" ] && [ -f "/$directory/ports/Doom Engines.sh" ] && grep -q 'uzdoom-start.sh' "/$directory/ports/Doom Engines.sh"; then
+    exec bash "/$directory/ports/Doom Engines.sh"
+fi
+# otherwise (no Doom Engines): the Love2D menu alone, if there is one, else the first IWAD found
 if [ -f "$DE/love" ]; then
     (
         cd "$DE" || exit 0
